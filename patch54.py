@@ -386,3 +386,20 @@ for line in (r.stdout or '').split(chr(10)):
         print("    " + line.strip())
 if r.returncode != 0:
     print("    stderr:", (r.stderr or '')[:300])
+
+
+# ============ 2j. selinux_hide.c 5.4 兼容 ============
+print("")
+print("  --- selinux_hide.c 5.4 ---")
+import subprocess as _sp2, shutil as _sh
+_hdr = '/tmp/selinux_access54.h'
+if os.path.exists(_hdr):
+    dst = os.path.join(fin_root, 'selinux', 'selinux_access54.h')
+    _sh.copy(_hdr, dst)
+    print("    [OK] selinux_access54.h copied")
+    r2 = _sp2.run(['python3', '/tmp/hide54.py', fin_root], capture_output=True, text=True)
+    for line in (r2.stdout or '').split(chr(10)):
+        if line.strip():
+            print("    " + line.strip())
+else:
+    print("    !! selinux_access54.h missing")
