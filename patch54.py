@@ -417,6 +417,16 @@ if r3.returncode != 0:
     print("    stderr:", (r3.stderr or '')[:300])
 
 
+# ============ 2k2. SELinux commit 语义修正 ============
+print("")
+print("  --- commit 语义修正 ---")
+import subprocess as _spc
+for _s in ['fix_commit2.py', 'fix_lock.py']:
+    r = _spc.run(['python3', '/tmp/' + _s, fin_root], capture_output=True, text=True)
+    for line in (r.stdout or '').split(chr(10)):
+        if line.strip():
+            print("    " + line.strip())
+
 # ============ 2l. 链接期符号补齐 ============
 print("")
 print("  --- link stubs 5.4 ---")
