@@ -7,7 +7,7 @@ exported-symbol requirements, because the whole driver is built into the
 kernel and can use kallsyms at runtime:
 
   ksu_handle_sys_reboot  -> no-op (only SUSFS defines it)
-  path_umount            -> resolve "ksys_umount" at runtime
+  path_umount            -> kern_unmount() on 5.4 (EXPORT_SYMBOL)
   path_mount             -> no-op for MS_PRIVATE on an unshared ns;
                             resolve "do_mount" at runtime otherwise
   seccomp_filter_release -> resolve at runtime; skip if only the 5.4
@@ -54,6 +54,8 @@ STUBS_BODY = r'''// SPDX-License-Identifier: GPL-2.0
 /* Only extension/susfs.c defines it, and that file builds only with   */
 /* CONFIG_KSU_SUSFS. Without SUSFS the hook is unused, so a no-op.     */
 /* ------------------------------------------------------------------ */
+#ifndef CONFIG_KSU_SUSFS
+/* extension/susfs.c also defines this when CONFIG_KSU_SUSFS=y. */
 int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd,
 			  void __user **arg)
 {
@@ -63,57 +65,33 @@ int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd,
 	(void)arg;
 	return 0;
 }
+#endif
 
 /* ------------------------------------------------------------------ */
 /* path_umount(struct path *, int)                                    */
-/* 5.4 has static do_umount(); the public entry is ksys_umount(name).  */
 /* ------------------------------------------------------------------ */
-typedef int (*ksu54_umount_fn)(char __user *name, int flags);
-typedef int (*ksu54_do_umount_fn)(void *mnt, int flags);
+/*
+ * path_umount(struct path *, int)
+ *
+ * 5.9+ detaches the mount from its namespace. 5.4 exposes the same thing
+ * as kern_unmount(struct vfsmount *) — it clears real_mount(mnt)->mnt_ns
+ * and drops the reference. It is EXPORT_SYMBOL'd, and takes the vfsmount
+ * pointer we already have in struct path, so there is no need to walk
+ * into the private struct mount (which is __randomize_layout anyway).
+ */
+extern void kern_unmount(struct vfsmount *mnt);
 
 int path_umount(struct path *path, int flags)
 {
-	static ksu54_umount_fn umount_fn;
-	static ksu54_do_umount_fn do_umount_fn;
-	char *page;
-	char *name;
-	int ret;
-
-	if (!path || !path->dentry || !path->mnt)
+	if (!path || !path->mnt)
 		return -EINVAL;
 
-	/* Preferred: call do_umount(real_mount(mnt), flags) directly. */
-	if (!do_umount_fn)
-		do_umount_fn = (ksu54_do_umount_fn)
-			kallsyms_lookup_name("do_umount");
-	if (do_umount_fn) {
-		/* real_mount() is container_of(mnt, struct mount, mnt).
-		 * struct vfsmount is not the first member on 5.4, so we
-		 * cannot compute it here without fs/mount.h. Use the
-		 * name-based path below instead. */
-	}
-
-	if (!umount_fn)
-		umount_fn = (ksu54_umount_fn) kallsyms_lookup_name("ksys_umount");
-	if (!umount_fn) {
-		pr_warn_ratelimited("ksu54: ksys_umount not resolvable\n");
-		return -ENOSYS;
-	}
-
-	page = __getname();
-	if (!page)
-		return -ENOMEM;
-
-	name = d_path(path, page, PATH_MAX);
-	if (IS_ERR(name)) {
-		ret = PTR_ERR(name);
-		__putname(page);
-		return ret;
-	}
-
-	ret = umount_fn((char __user *)name, flags);
-	__putname(page);
-	return ret;
+	/* kern_unmount has no flags argument: it always performs a lazy
+	 * detach (mnt_ns = NULL + mntput), which is what FinaSU wants for
+	 * hiding its own bind mounts. MNT_DETACH needs no special handling. */
+	(void)flags;
+	kern_unmount(path->mnt);
+	return 0;
 }
 
 /* ------------------------------------------------------------------ */
