@@ -374,3 +374,15 @@ struct selinux_policy {
 else:
     print("    [!] selinux dir not found")
 
+
+
+# ============ 2i. filename_trans 5.4 兼容 ============
+print("")
+print("  --- filename_trans 5.4 ---")
+import subprocess as _sp
+r = _sp.run(['python3', '/tmp/fntrans54.py', fin_root], capture_output=True, text=True)
+for line in (r.stdout or '').split(chr(10)):
+    if line.strip():
+        print("    " + line.strip())
+if r.returncode != 0:
+    print("    stderr:", (r.stderr or '')[:300])
