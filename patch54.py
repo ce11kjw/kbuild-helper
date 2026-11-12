@@ -415,3 +415,15 @@ for line in (r3.stdout or '').split(chr(10)):
         print("    " + line.strip())
 if r3.returncode != 0:
     print("    stderr:", (r3.stderr or '')[:300])
+
+
+# ============ 2l. 链接期符号补齐 ============
+print("")
+print("  --- link stubs 5.4 ---")
+import subprocess as _sp4
+r4 = _sp4.run(['python3', '/tmp/link54b.py', fin_root], capture_output=True, text=True)
+for line in (r4.stdout or '').split(chr(10)):
+    if line.strip():
+        print("    " + line.strip())
+if r4.returncode != 0:
+    print("    stderr:", (r4.stderr or '')[:300])
