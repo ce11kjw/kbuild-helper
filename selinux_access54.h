@@ -22,7 +22,10 @@
 #endif
 
 /* 5.4: policy / status lock+page all live in selinux_state.ss */
-#define ksu54_selinux_policy()      (selinux_state.ss)
+/* cast so it can be assigned to struct selinux_policy * variables:
+ * on 5.4 the two share sidtab + policydb + latest_granting at the top,
+ * which is all FinaSU reads through this pointer. */
+#define ksu54_selinux_policy()      ((struct selinux_policy *)(void *)selinux_state.ss)
 #define ksu54_status_lock()         (&selinux_state.ss->status_lock)
 #define ksu54_status_page()         (selinux_state.ss->status_page)
 
