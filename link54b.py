@@ -126,22 +126,27 @@ int path_mount(const char *dev_name, struct path *path, const char *type_page,
 /* takes a task_struct. Resolve the 5.9 name if a backport provides it,*/
 /* otherwise skip — the caller only uses this to drop a fake filter.   */
 /* ------------------------------------------------------------------ */
-typedef void (*ksu54_seccomp_release_fn)(struct task_struct *tsk);
+/*
+ * seccomp_filter_release(struct task_struct *)
+ *
+ * 5.9+ renamed the refcount-drop helper and made it take the task whose
+ * filter should be released. On 5.4 the equivalent is put_seccomp_filter(),
+ * which does __put_seccomp_filter(tsk->seccomp.filter).
+ *
+ * FinaSU's disable_seccomp() copies current into a fake task_struct,
+ * clears current->seccomp.filter, then calls this with the fake so the
+ * original filter still gets its reference dropped. Calling
+ * put_seccomp_filter(fake) reproduces exactly that.
+ */
+extern void put_seccomp_filter(struct task_struct *tsk);
 
 void seccomp_filter_release(struct task_struct *tsk)
 {
-	static ksu54_seccomp_release_fn fn;
-	static bool resolved;
-
-	if (!resolved) {
-		fn = (ksu54_seccomp_release_fn)
-			kallsyms_lookup_name("seccomp_filter_release");
-		resolved = true;
-		if (!fn)
-			pr_info("ksu54: seccomp_filter_release absent, skipping\n");
-	}
-	if (fn)
-		fn(tsk);
+	if (!tsk)
+		return;
+	if (!tsk->seccomp.filter)
+		return;
+	put_seccomp_filter(tsk);
 }
 
 #endif /* < 5.9 */
