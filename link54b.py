@@ -43,6 +43,11 @@ STUBS_BODY = r'''// SPDX-License-Identifier: GPL-2.0
 #include <linux/kallsyms.h>
 #include <linux/types.h>
 #include <linux/namei.h>
+#include <linux/slab.h>
+#include <linux/dcache.h>
+#include <linux/mount.h>
+#include <uapi/linux/mount.h>
+#include <uapi/linux/fs.h>
 
 /* ------------------------------------------------------------------ */
 /* ksu_handle_sys_reboot                                              */
