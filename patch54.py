@@ -403,3 +403,15 @@ if os.path.exists(_hdr):
             print("    " + line.strip())
 else:
     print("    !! selinux_access54.h missing")
+
+
+# ============ 2k. sidtab 5.4 兼容 ============
+print("")
+print("  --- sidtab 5.4 ---")
+import subprocess as _sp3
+r3 = _sp3.run(['python3', '/tmp/sidtab54.py', fin_root], capture_output=True, text=True)
+for line in (r3.stdout or '').split(chr(10)):
+    if line.strip():
+        print("    " + line.strip())
+if r3.returncode != 0:
+    print("    stderr:", (r3.stderr or '')[:300])
