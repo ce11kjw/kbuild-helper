@@ -2,7 +2,7 @@
 """Patch feature/selinux_hide.c for Linux 5.4 (build helper)."""
 import os, re, sys
 
-INCLUDE_LINE = '#include "selinux_access54.h"'
+INCLUDE_LINE = '#include "../selinux/selinux_access54.h"'
 POLICY_RE = re.compile(
     r'rcu_dereference(?:_protected)?\(\s*selinux_state\.policy\s*(?:,[^)]*)?\)')
 
