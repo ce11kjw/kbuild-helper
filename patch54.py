@@ -427,6 +427,16 @@ for _s in ['fix_commit2.py', 'fix_lock.py']:
         if line.strip():
             print("    " + line.strip())
 
+# ============ 2k3. 泄漏与 UAF 修正 ============
+print("")
+print("  --- 泄漏与 UAF 修正 ---")
+import subprocess as _spu
+for _s in ['fix_leak.py', 'fix_uaf2.py', 'fix_uaf3.py']:
+    r = _spu.run(['python3', '/tmp/' + _s, fin_root], capture_output=True, text=True)
+    for line in (r.stdout or '').split(chr(10)):
+        if line.strip():
+            print("    " + line.strip())
+
 # ============ 2l. 链接期符号补齐 ============
 print("")
 print("  --- link stubs 5.4 ---")
