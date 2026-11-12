@@ -336,3 +336,41 @@ for name in ['infra/seccomp_cache.c', 'manager/pkg_observer.c']:
             print("   " + ln)
 print("")
 print("=== done ===")
+
+
+# ============ 2h. SELinux 5.4 compat (rules.c + sepolicy.h) ============
+import subprocess
+print("")
+print("  --- SELinux 5.4 compat ---")
+elsec = os.path.join(fin_root, 'selinux')
+if os.path.isdir(elsec):
+    # 用内联方式应用（与 selinux54d.py 相同逻辑）
+    SEP_H = """
+/* ===== 5.4 compat: define struct selinux_policy (build helper) ===== */
+#include <linux/version.h>
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 9, 0)
+struct selinux_policy {
+	struct sidtab *sidtab;
+	struct policydb policydb;
+	u32 latest_granting;
+};
+#endif
+/* ===== end ===== */
+"""
+    sh_path = os.path.join(elsec, 'sepolicy.h')
+    if os.path.exists(sh_path):
+        t = open(sh_path, encoding='utf-8', errors='surrogateescape').read()
+        if 'struct selinux_policy {' not in t:
+            mk = '#include "ss/policydb.h"'
+            t = t.replace(mk, mk + chr(10) + SEP_H, 1) if mk in t else SEP_H + chr(10) + t
+            open(sh_path, 'w', encoding='utf-8', errors='surrogateescape').write(t)
+            print("    [OK] sepolicy.h: struct added")
+    # 调用外部脚本处理 rules.c
+    r = subprocess.run(['python3', '/tmp/selinux54d.py', fin_root],
+                       capture_output=True, text=True)
+    for line in (r.stdout or '').split(chr(10)):
+        if line.strip():
+            print("    " + line.strip())
+else:
+    print("    [!] selinux dir not found")
+
