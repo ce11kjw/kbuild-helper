@@ -103,18 +103,33 @@ def main():
             s = '\n'.join(lines)
         print("  [OK] Kbuild: ksu54_stub.o added")
 
-    # 3. preinit 禁用（只加一次，替换对象行为 ccflags）
-    if 'ksu54_force_no_preinit' not in s:
-        old_objs = 'kernelsu-objs += preinit/preinit.o\nkernelsu-objs += preinit/blob.o\n'
-        if old_objs in s:
-            new_objs = ('# ksu54_force_no_preinit: preinit swaps a static runner.elf in\n'
-                        '# for PID 1\'s "init selinux_setup" execve; that is the most\n'
-                        '# likely cause of a silent hang at the boot logo with no log.\n'
-                        'ccflags-y += -DKSU_NO_PREINIT\n')
-            s = s.replace(old_objs, new_objs, 1)
-            print("  [OK] Kbuild: preinit disabled (objects dropped + -DKSU_NO_PREINIT)")
+    # 3. preinit：默认必须保留（init selinux_setup 阶段的 KSU hook，
+    #    禁用它会导致卡第一屏）。只有显式 KSU54_ENABLE_PREINIT=0 才移除。
+    enable_preinit = os.environ.get('KSU54_ENABLE_PREINIT', '1')
+    if enable_preinit == '1':
+        # 保留 preinit 对象；如果之前被错误地贴了 -DKSU_NO_PREINIT，撤掉
+        if 'ksu54_force_no_preinit' in s:
+            s = s.replace(
+                '# ksu54_force_no_preinit: preinit swaps a static runner.elf in\n'
+                '# for PID 1\'s "init selinux_setup" execve; that is the most\n'
+                '# likely cause of a silent hang at the boot logo with no log.\n'
+                'ccflags-y += -DKSU_NO_PREINIT\n',
+                'kernelsu-objs += preinit/preinit.o\nkernelsu-objs += preinit/blob.o\n',
+                1)
+            print("  [FIX] Kbuild: preinit re-enabled (removed -DKSU_NO_PREINIT)")
         else:
-            print("  [--] Kbuild: preinit object lines not found")
+            has_objs = 'kernelsu-objs += preinit/preinit.o' in s
+            print("  [OK] Kbuild: preinit kept (objects present=%s)" % has_objs)
+    else:
+        if 'ksu54_force_no_preinit' not in s:
+            old_objs = 'kernelsu-objs += preinit/preinit.o\nkernelsu-objs += preinit/blob.o\n'
+            if old_objs in s:
+                new_objs = ('# ksu54_force_no_preinit: debug build, preinit disabled\n'
+                            'ccflags-y += -DKSU_NO_PREINIT\n')
+                s = s.replace(old_objs, new_objs, 1)
+                print("  [WARN] Kbuild: preinit disabled (debug only, device will hang)")
+            else:
+                print("  [--] Kbuild: preinit object lines not found")
 
     if s != orig:
         io.open(KB, 'w', encoding='utf-8').write(s)
