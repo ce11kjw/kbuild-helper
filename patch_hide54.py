@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """
-selinux_hide.c 的 Linux 5.4 适配（v2，字段映射与 ss 布局严格对齐）
+selinux_hide.c 的 Linux 5.4 适配（v5，精确锚点插入）
+
+插入锚点：第一个 `static DEFINE_MUTEX(selinux_hide_mutex);`（所有 include 与
+CONFIG 守卫都已结束，且是文件第一个真正的语句）。
 """
 import io
 import os
@@ -13,89 +16,82 @@ if not os.path.isdir(SUDIR):
     SUDIR = os.path.join(KDIR, 'drivers', 'kernelsu')
 SIH = os.path.join(SUDIR, 'feature', 'selinux_hide.c')
 
-VIEW_BLOCK = '''
-/*
- * ksu54_policy_view: 5.4 has no struct selinux_policy (split out in 5.7); the
- * policydb, sidtab and latest_granting all live in struct selinux_ss.
- * sepolicy.h widens struct selinux_policy below 5.7 so its first three
- * members mirror selinux_ss byte for byte, making this cast a plain
- * reinterpretation of the same layout.
- */
+MARKER = 'KSU54_SELINUX_HIDE_PORT'
+
+BLOCK = '''/* ===== KSU54_SELINUX_HIDE_PORT ==========================================
+ * FinaSU's selinux_hide targets 5.7+, where the policy lives in a separate
+ * struct selinux_policy and sidtab entries are struct sidtab_entry. This 5.4
+ * kernel keeps everything in struct selinux_ss and stores a struct context
+ * inline in each sidtab leaf, so the helpers below are re-implemented rather
+ * than aliased.
+ * ======================================================================== */
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 7, 0)
 #define KSU54_HAVE_POLICY_VIEW 1
+
+/* 5.4: no struct selinux_policy; the ss itself carries policydb + sidtab +
+ * latest_granting. sepolicy.h widens the struct so its first two members
+ * mirror selinux_ss exactly, making this a layout reinterpretation. */
 static inline struct selinux_policy *ksu54_policy_view(void)
 {
-    return (struct selinux_policy *)selinux_state.ss;
+	return (struct selinux_policy *)selinux_state.ss;
 }
 #endif
+
 '''
 
-SIDTAB_DUP = '''
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 7, 0)
+NEW_FUNCS = '''#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 7, 0)
 /*
- * ksu54_sidtab_dup: clone a 5.4 sidtab for the policy backup.
- *
- * A 5.4 sidtab becomes an immutable radix tree once the policy is loaded;
- * entries are only added through sidtab_context_to_sid() under s->lock. The
- * backup exists purely for read-only SID lookups while the live policy is
- * swapped, so duplicating the node pointers and re-initialising the lock and
- * reverse map is sufficient (no live-convert machinery needed).
+ * 5.4 sidtab leaves store a struct context inline and expose no per-sid
+ * string cache, so the 6.x helper collapses to a plain context render.
  */
-static struct sidtab *ksu54_sidtab_dup(struct sidtab *src)
+static int sidtab_entry_to_string(struct policydb *p, struct sidtab *sidtab,
+                                  struct context *entry, char **scontext,
+                                  u32 *scontext_len)
 {
-    struct sidtab *dst;
-    int i;
-
-    if (!src)
-        return NULL;
-    dst = kmemdup(src, sizeof(*dst), GFP_KERNEL);
-    if (!dst)
-        return NULL;
-    spin_lock_init(&dst->lock);
-    dst->convert = NULL;
-    for (i = 0; i < (1 << SIDTAB_HASH_BITS); i++)
-        INIT_HLIST_HEAD(&dst->context_to_sid[i]);
-    return dst;
-}
-#endif
-'''
-
-HELPERS = '''
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 7, 0)
-/* ksu54_selinux_hide_shims ------------------------------------------------ */
-/*
- * 5.4 sidtab leaves store a struct context inline (there is no 6.x
- * struct sidtab_entry) and only sidtab_search() is available, so the two
- * newer helpers FinaSU calls get equivalents with upstream semantics.
- */
-static inline struct context *ksu54_sidtab_search_entry(struct sidtab *s, u32 sid)
-{
-    return sidtab_search(s, sid);
+	(void)sidtab;
+	if (!entry)
+		return -EINVAL;
+	return context_struct_to_string(p, entry, scontext, scontext_len);
 }
 
-static inline int ksu54_sidtab_entry_to_string(struct policydb *p,
-                                               struct sidtab *sidtab,
-                                               struct context *entry,
-                                               char **scontext,
+static int security_sid_to_context_with_policy(struct selinux_policy *policy,
+                                               u32 sid, char **scontext,
                                                u32 *scontext_len)
 {
-    (void)sidtab;   /* 5.4 has no per-sid string cache */
-    if (!entry)
-        return -EINVAL;
-    return context_struct_to_string(p, entry, scontext, scontext_len);
+	struct policydb *policydb;
+	struct sidtab *sidtab;
+	struct context *entry;
+	int rc;
+
+	if (scontext)
+		*scontext = NULL;
+	*scontext_len = 0;
+
+	policydb = &policy->policydb;
+	sidtab = policy->sidtab;
+
+	entry = sidtab_search(sidtab, sid);
+	if (!entry) {
+		pr_err("SELinux: %s:  unrecognized SID %d\\n", __func__, sid);
+		return -EINVAL;
+	}
+
+	rc = sidtab_entry_to_string(policydb, sidtab, entry, scontext, scontext_len);
+	return rc;
 }
-#endif /* < 5.7 */
+#else
 '''
+
+ANCHOR = 'static DEFINE_MUTEX(selinux_hide_mutex);'
 
 
 def main():
     if not os.path.exists(SIH):
         print("  [SKIP] selinux_hide.c")
         return
-
     s = io.open(SIH, encoding='utf-8').read()
-    if 'KSU54_HAVE_POLICY_VIEW' in s:
-        print("  [--] already patched")
+    if MARKER in s:
+        print("  [--] already patched (idempotent skip)")
         return
 
     n0 = len(s)
@@ -106,28 +102,34 @@ def main():
     s = s.replace('selinux_state.status_page', 'selinux_state.ss->status_page')
     print("  status_lock x%d / status_page x%d -> ss->" % (a, b))
 
-    c = s.count('sidtab_search_entry(')
-    s = s.replace('sidtab_search_entry(', 'ksu54_sidtab_search_entry(')
-    d = s.count('sidtab_entry_to_string(')
-    s = s.replace('sidtab_entry_to_string(', 'ksu54_sidtab_entry_to_string(')
-    print("  sidtab_search_entry x%d / entry_to_string x%d -> shims" % (c, d))
-
     e = s.count('rcu_dereference(selinux_state.policy)')
     s = re.sub(r'rcu_dereference(?:_protected)?\(\s*selinux_state\.policy\s*(?:,[^)]*)?\)',
                'ksu54_policy_view()', s)
     print("  selinux_state.policy x%d -> ksu54_policy_view()" % e)
 
-    idx = s.find('\n#include')
-    if idx < 0:
-        print("  !! no include anchor")
+    old_start = s.find('static int sidtab_entry_to_string(struct policydb *p, struct sidtab *sidtab, struct sidtab_entry *entry,')
+    if old_start < 0:
+        print("  !! sidtab_entry_to_string not found")
         return
-    nxt = s.find('\n', idx + 1)
-    s = s[:nxt+1] + VIEW_BLOCK + SIDTAB_DUP + HELPERS + s[nxt+1:]
+    anchor2 = 'static void avd_init(struct selinux_policy *policy'
+    old_end = s.find(anchor2, old_start)
+    if old_end < 0:
+        print("  !! avd_init anchor not found")
+        return
+    s = s[:old_start] + NEW_FUNCS + s[old_start:old_end] + '#endif /* < 5.7 */\n\n' + s[old_end:]
+    print("  [OK] sidtab_entry_to_string + security_sid_to_context replaced")
+
+    idx = s.find(ANCHOR)
+    if idx < 0:
+        print("  !! DEFINE_MUTEX anchor not found")
+        return
+    s = s[:idx] + BLOCK + s[idx:]
+    print("  [OK] shim inserted before 'static DEFINE_MUTEX(selinux_hide_mutex);'")
 
     io.open(SIH, 'w', encoding='utf-8').write(s)
     print("  [OK] selinux_hide.c %d -> %d bytes" % (n0, len(s)))
 
 
 if __name__ == '__main__':
-    print("=== selinux_hide.c 5.4 port v2 ===")
+    print("=== selinux_hide.c 5.4 port v5 ===")
     main()
