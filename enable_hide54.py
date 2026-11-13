@@ -56,6 +56,23 @@ static int security_sid_to_context_with_policy(struct selinux_policy *policy,
 	return security_sid_to_context(&selinux_state, sid, scontext, scontext_len);
 }
 
+/*
+ * ksu54: the 5.7+ implementation of this helper lives inside the
+ * #if 0'd policydb/sidtab-internals block (it calls
+ * backup_string_to_context_struct, which is also disabled). my_setprocattr
+ * still calls it, so provide the 5.4 equivalent here: ask the live policy
+ * for the SID directly.
+ */
+static int security_context_to_sid_live(const char *scontext, u32 scontext_len,
+                                        u32 *sid)
+{
+	if (!scontext_len)
+		return -EINVAL;
+	return security_context_to_sid_default(&selinux_state, scontext,
+	                                       scontext_len, sid, SECSID_NULL,
+	                                       GFP_KERNEL);
+}
+
 static void security_compute_av_user_with_policy(struct selinux_policy *policy,
                                                  u32 ssid, u32 tsid, u16 tclass,
                                                  struct av_decision *avd)
