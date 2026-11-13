@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-selinux_hide.c 的 Linux 5.4 适配（v5，精确锚点插入）
+selinux_hide.c 的 Linux 5.4 适配（v6）
 
-插入锚点：第一个 `static DEFINE_MUTEX(selinux_hide_mutex);`（所有 include 与
-CONFIG 守卫都已结束，且是文件第一个真正的语句）。
+v5 之后仅剩 2 个错误：symtab_search 未声明。
+5.4 的 ss/symtab.h 只声明 symtab_init()，没有 symtab_search()；
+查符号表要走 hashtab_search(s->table, name)。这个包装必须无条件引入，
+所以放在文件靠前（symtab.h 已由 policydb.h 间接包含）。
 """
 import io
 import os
@@ -35,8 +37,16 @@ static inline struct selinux_policy *ksu54_policy_view(void)
 {
 	return (struct selinux_policy *)selinux_state.ss;
 }
-#endif
 
+/*
+ * 5.4 ss/symtab.h declares only symtab_init(); 5.7 added symtab_search().
+ * Lookups in this tree go through hashtab_search() on the symbol table.
+ */
+static inline void *ksu54_symtab_search(struct symtab *s, const char *name)
+{
+	return hashtab_search(s->table, name);
+}
+#endif
 '''
 
 NEW_FUNCS = '''#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 7, 0)
@@ -91,7 +101,27 @@ def main():
         return
     s = io.open(SIH, encoding='utf-8').read()
     if MARKER in s:
-        print("  [--] already patched (idempotent skip)")
+        if 'ksu54_symtab_search' in s:
+            print("  [--] already patched (idempotent skip)")
+            return
+        # v5 打过但没有 symtab shim，补上
+        old = '#define KSU54_HAVE_POLICY_VIEW 1'
+        add = '''#define KSU54_HAVE_POLICY_VIEW 1
+
+/*
+ * 5.4 ss/symtab.h declares only symtab_init(); 5.7 added symtab_search().
+ * Lookups in this tree go through hashtab_search() on the symbol table.
+ */
+static inline void *ksu54_symtab_search(struct symtab *s, const char *name)
+{
+	return hashtab_search(s->table, name);
+}'''
+        s = s.replace(old, add, 1)
+        # 替换调用点
+        n = s.count('symtab_search(') - s.count('ksu54_symtab_search(')
+        s = re.sub(r'(?<!ksu54_)symtab_search\(', 'ksu54_symtab_search(', s)
+        io.open(SIH, 'w', encoding='utf-8').write(s)
+        print("  [FIX] added ksu54_symtab_search, rewrote %d call sites" % n)
         return
 
     n0 = len(s)
@@ -123,13 +153,18 @@ def main():
     if idx < 0:
         print("  !! DEFINE_MUTEX anchor not found")
         return
-    s = s[:idx] + BLOCK + s[idx:]
-    print("  [OK] shim inserted before 'static DEFINE_MUTEX(selinux_hide_mutex);'")
+    s = s[:idx] + BLOCK + '\n' + s[idx:]
+    print("  [OK] shim block inserted")
+
+    # 最后统一改写 symtab_search 调用点
+    n = s.count('symtab_search(') - s.count('ksu54_symtab_search(')
+    s = re.sub(r'(?<!ksu54_)symtab_search\(', 'ksu54_symtab_search(', s)
+    print("  [OK] symtab_search -> ksu54_symtab_search x%d" % n)
 
     io.open(SIH, 'w', encoding='utf-8').write(s)
     print("  [OK] selinux_hide.c %d -> %d bytes" % (n0, len(s)))
 
 
 if __name__ == '__main__':
-    print("=== selinux_hide.c 5.4 port v5 ===")
+    print("=== selinux_hide.c 5.4 port v6 ===")
     main()
