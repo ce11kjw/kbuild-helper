@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""sepolicy.c 5.4 backport（独立文件）"""
+"""
+sepolicy.c 5.4 backport（v2）
+ - dup/destroy 带 sidtab 克隆（与 sepolicy.h 的 ksu54_sidtab_dup 配套）
+ - filename_trans 真 5.4 hashtab 实现
+"""
 import io
 import os
 import re
@@ -11,62 +15,85 @@ if not os.path.isdir(SUDIR):
     SUDIR = os.path.join(KDIR, 'drivers', 'kernelsu')
 SEC = os.path.join(SUDIR, 'selinux', 'sepolicy.c')
 
-DUP_54 = '''/* KSU54_FNTRANS: 5.4 backport of dup/destroy (struct selinux_policy here
- * only carries a policydb, see sepolicy.h shim). */
+DUP_54 = '''/* KSU54_FNTRANS: 5.4 backport of dup/destroy. */
 void ksu_destroy_sepolicy(struct selinux_policy *pol)
 {
-    if (!pol)
-        return;
-    policydb_destroy(&pol->policydb);
-    kfree(pol);
+	if (!pol)
+		return;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 7, 0)
+	/* A duplicated policy owns its sidtab copy; a live view owns nothing. */
+	if (pol->sidtab) {
+		sidtab_destroy(pol->sidtab);
+		kfree(pol->sidtab);
+		pol->sidtab = NULL;
+	}
+#endif
+	policydb_destroy(&pol->policydb);
+	kfree(pol);
 }
 
 struct selinux_policy *ksu_dup_sepolicy(struct selinux_policy *old_pol)
 {
-    struct selinux_policy *new_pol;
-    struct policy_file fp;
-    void *data;
-    size_t len;
-    int ret;
+	struct selinux_policy *new_pol;
+	struct policy_file fp;
+	void *data;
+	size_t len;
+	int ret;
 
-    len = old_pol->policydb.len;
-    if (len < 4096)
-        len = 4096;
-    data = vmalloc(len);
-    if (!data)
-        return ERR_PTR(-ENOMEM);
+	if (!old_pol)
+		return ERR_PTR(-EINVAL);
 
-    fp.data = data;
-    fp.len = len;
-    ret = policydb_write(&old_pol->policydb, &fp);
-    if (ret) {
-        pr_err("sepolicy54: policydb_write: %d\\n", ret);
-        goto out_free_data;
-    }
-    len -= fp.len;
+	len = old_pol->policydb.len;
+	if (len < 4096)
+		len = 4096;
+	data = vmalloc(len);
+	if (!data)
+		return ERR_PTR(-ENOMEM);
 
-    new_pol = kzalloc(sizeof(*new_pol), GFP_KERNEL);
-    if (!new_pol) {
-        ret = -ENOMEM;
-        goto out_free_data;
-    }
+	fp.data = data;
+	fp.len = len;
+	ret = policydb_write(&old_pol->policydb, &fp);
+	if (ret) {
+		pr_err("sepolicy54: policydb_write: %d\\n", ret);
+		goto out_free_data;
+	}
+	len -= fp.len;
 
-    fp.data = data;
-    fp.len = len;
-    ret = policydb_read(&new_pol->policydb, &fp);
-    if (ret) {
-        pr_err("sepolicy54: policydb_read: %d\\n", ret);
-        kfree(new_pol);
-        goto out_free_data;
-    }
-    new_pol->policydb.len = len;
-    kvfree(data);
-    pr_info("sepolicy54: dup policydb ok, len %zu\\n", len);
-    return new_pol;
+	new_pol = kzalloc(sizeof(*new_pol), GFP_KERNEL);
+	if (!new_pol) {
+		ret = -ENOMEM;
+		goto out_free_data;
+	}
+
+	fp.data = data;
+	fp.len = len;
+	ret = policydb_read(&new_pol->policydb, &fp);
+	if (ret) {
+		pr_err("sepolicy54: policydb_read: %d\\n", ret);
+		kfree(new_pol);
+		goto out_free_data;
+	}
+	new_pol->policydb.len = len;
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 7, 0)
+	/* 5.4 keeps sidtab outside policydb, so a backup needs its own copy. */
+	new_pol->sidtab = ksu54_sidtab_dup(old_pol->sidtab);
+	if (!new_pol->sidtab) {
+		policydb_destroy(&new_pol->policydb);
+		kfree(new_pol);
+		ret = -ENOMEM;
+		goto out_free_data;
+	}
+#endif
+	new_pol->latest_granting = old_pol->latest_granting;
+
+	kvfree(data);
+	pr_info("sepolicy54: dup policydb ok, len %zu\\n", len);
+	return new_pol;
 
 out_free_data:
-    kvfree(data);
-    return ERR_PTR(ret);
+	kvfree(data);
+	return ERR_PTR(ret);
 }
 '''
 
@@ -164,26 +191,20 @@ def main():
         print("  [--] sepolicy.c already patched")
         return
 
-    # 1. 删掉 5.7+ 的 dup/destroy
-    s2 = re.sub(r'void ksu_destroy_sepolicy\(struct selinux_policy \*pol\)\s*\{.*?\n\}\n',
-                '', s, count=1, flags=re.S)
-    s3 = re.sub(r'struct selinux_policy \*ksu_dup_sepolicy\(struct selinux_policy \*old_pol\)\s*\{.*?\n\}\n',
-                '', s2, count=1, flags=re.S)
-    if s3 != s:
-        removed = True
-    else:
-        removed = False
+    # 移除 5.7+ 原生实现（不跨行贪婪匹配过远）
+    s2 = re.sub(r'\nvoid ksu_destroy_sepolicy\(struct selinux_policy \*pol\)\n\{.*?\n\}\n',
+                '\n', s, count=1, flags=re.S)
+    s3 = re.sub(r'\nstruct selinux_policy \*ksu_dup_sepolicy\(struct selinux_policy \*old_pol\)\n\{.*?\n\}\n',
+                '\n', s2, count=1, flags=re.S)
     s = s3
 
-    # 2. 插入 5.4 版本
     anchor = '// ======== sepolicy ========'
     if anchor in s:
         s = s.replace(anchor, anchor + '\n' + DUP_54, 1)
-        print("  [OK] sepolicy.c: dup/destroy 5.4 impl inserted")
+        print("  [OK] sepolicy.c: dup/destroy with sidtab clone")
     else:
-        print("  !! sepolicy.c: '// ======== sepolicy ========' anchor not found")
+        print("  !! anchor '// ======== sepolicy ========' not found")
 
-    # 3. filename_trans 5.4 实现
     a = s.find('static bool add_filename_trans(struct policydb *db',
                s.find('static bool add_genfscon('))
     if a != -1:
@@ -192,14 +213,14 @@ def main():
             s = s[:a] + FNTRANS_54 + s[a:b] + '#endif /* < 5.9 */\n\n' + s[b:]
             print("  [OK] sepolicy.c: add_filename_trans 5.4 impl")
         else:
-            print("  !! sepolicy.c: add_genfscon end anchor not found")
+            print("  !! add_genfscon end anchor not found")
     else:
-        print("  !! sepolicy.c: add_filename_trans not found (first pass)")
+        print("  !! add_filename_trans not found")
 
     io.open(SEC, 'w', encoding='utf-8').write(s)
     print("  [OK] sepolicy.c written")
 
 
 if __name__ == '__main__':
-    print("=== sepolicy.c 5.4 backport ===")
+    print("=== sepolicy.c 5.4 (v2) ===")
     main()
