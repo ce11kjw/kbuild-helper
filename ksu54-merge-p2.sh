@@ -350,18 +350,10 @@ python3 /tmp/_kum_fix.py "$KUM"
 fi
 
 # ---------- SELinux ----------
+# 由 workflow 的独立步骤统一执行（patch_selinux54 / patch_hide54 / patch_dup54 /
+# patch_sepolicy54b），此处不再调用，避免重复执行导致 #if 结构被破坏。
 echo ""
-echo "[8-9/14] SELinux policy shadow + sepolicy.c"
-if [ -f /tmp/patch_selinux54.py ]; then
-  python3 /tmp/patch_selinux54.py "$KDIR"
-else
-  echo "    !! patch_selinux54.py missing"
-fi
-if [ -f /tmp/patch_sepolicy54.py ]; then
-  python3 /tmp/patch_sepolicy54.py "$KDIR"
-else
-  echo "    !! patch_sepolicy54.py missing"
-fi
+echo "[8-9/14] SELinux: delegated to workflow step"
 
 echo ""
 echo "=== [merge part 2/3] done ==="
