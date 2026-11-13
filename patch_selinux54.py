@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SELinux policy 5.4 shadow 补丁（独立文件，避免 heredoc 转义问题）"""
+"""SELinux policy 5.4 shadow 补丁（含 latest_granting 字段）"""
 import io
 import sys
 import os
@@ -17,8 +17,14 @@ SHIM = """#include <linux/version.h>
 #define KSU54_SELINUX_POLICY_SHIM 1
 #include <linux/sched.h>
 #include "ss/services.h"
+/*
+ * 5.4 has no struct selinux_policy (split out in 5.7). FinaSU only touches
+ * ->policydb and ->latest_granting, both of which live in struct selinux_ss
+ * on 5.4, so mirror exactly those two fields here.
+ */
 struct selinux_policy {
     struct policydb policydb;
+    u32 latest_granting;
 };
 extern struct selinux_state selinux_state;
 #endif
@@ -30,14 +36,14 @@ MACROS = """struct selinux_policy *backup_sepolicy;
 #define KSU54_POLICY_FIELD
 /*
  * 5.4 keeps the policy in selinux_state.ss->policydb protected by
- * policy_rwlock. FinaSU only touches ->policydb through struct
- * selinux_policy, so hand out a shadow that mirrors the live db and commit
- * by copying the db back.
+ * policy_rwlock, and the policy generation counter in ss->latest_granting.
+ * Hand out a shadow that mirrors both, and commit by copying them back.
  */
 static struct selinux_policy *ksu54_current_policy(void)
 {
     static struct selinux_policy shadow;
     shadow.policydb = selinux_state.ss->policydb;
+    shadow.latest_granting = selinux_state.ss->latest_granting;
     return &shadow;
 }
 
@@ -45,7 +51,7 @@ static struct selinux_policy *ksu54_current_policy(void)
 #define KSU_POLICY_COMMIT(pol) do { \\
         write_lock_irq(&selinux_state.ss->policy_rwlock); \\
         selinux_state.ss->policydb = (pol)->policydb; \\
-        selinux_state.ss->latest_granting++; \\
+        selinux_state.ss->latest_granting = (pol)->latest_granting; \\
         write_unlock_irq(&selinux_state.ss->policy_rwlock); \\
     } while (0)
 #define KSU_POLICY_LOCK() mutex_lock(&selinux_state.ss->status_lock)
@@ -68,7 +74,14 @@ def patch_sepolicy_h():
         return
     s = io.open(SPH, encoding='utf-8').read()
     if 'KSU54_SELINUX_POLICY_SHIM' in s:
-        print("  [--] sepolicy.h already patched")
+        if 'u32 latest_granting;' not in s:
+            s = s.replace(
+                'struct selinux_policy {\n    struct policydb policydb;\n};',
+                'struct selinux_policy {\n    struct policydb policydb;\n    u32 latest_granting;\n};', 1)
+            io.open(SPH, 'w', encoding='utf-8').write(s)
+            print("  [FIX] sepolicy.h: added latest_granting field")
+        else:
+            print("  [--] sepolicy.h already ok")
         return
     anchor = 'struct selinux_policy *ksu_dup_sepolicy'
     if anchor not in s:
@@ -76,7 +89,7 @@ def patch_sepolicy_h():
         return
     s = s.replace(anchor, SHIM + anchor, 1)
     io.open(SPH, 'w', encoding='utf-8').write(s)
-    print("  [OK] sepolicy.h: struct selinux_policy shim")
+    print("  [OK] sepolicy.h: shim (policydb + latest_granting)")
 
 
 def patch_rules():
@@ -84,8 +97,16 @@ def patch_rules():
         print("  [SKIP] rules.c")
         return
     s = io.open(RUL, encoding='utf-8').read()
+
     if 'KSU54_POLICY_FIELD' in s:
-        print("  [--] rules.c already patched")
+        if 'latest_granting = (pol)->latest_granting' not in s:
+            s = s.replace(
+                'selinux_state.ss->latest_granting++;',
+                'selinux_state.ss->latest_granting = (pol)->latest_granting;', 1)
+            io.open(RUL, 'w', encoding='utf-8').write(s)
+            print("  [FIX] rules.c: COMMIT syncs latest_granting from pol")
+        else:
+            print("  [--] rules.c already ok")
         return
 
     old = 'struct selinux_policy *backup_sepolicy;'
@@ -94,16 +115,13 @@ def patch_rules():
         return
     s = s.replace(old, MACROS, 1)
 
-    # 锁
     s = s.replace('mutex_lock(&selinux_state.policy_mutex);', 'KSU_POLICY_LOCK();')
     s = s.replace('mutex_unlock(&selinux_state.policy_mutex);', 'KSU_POLICY_UNLOCK();')
 
-    # 读
     s = s.replace(
         'old_pol = rcu_dereference_protected(selinux_state.policy, lockdep_is_held(&selinux_state.policy_mutex));',
         'old_pol = KSU_POLICY_GET();')
 
-    # 写（两处）
     old_commit = """    rcu_assign_pointer(selinux_state.policy, pol);
     synchronize_rcu();
     ksu_destroy_sepolicy(old_pol);"""
@@ -121,7 +139,6 @@ def patch_rules():
         s = s.replace(old_commit, new_commit)
         print("  [OK] rules.c: %d commit sites" % n)
 
-    # 删除 5.7+ sidtab backup 块
     a = s.find('backup_sepolicy->sidtab = kzalloc')
     if a != -1:
         b = s.find('    pol = ksu_dup_sepolicy(old_pol);', a)
